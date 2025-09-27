@@ -10,19 +10,23 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BASE = process.env.RAPIDAPI_BASE!;
 const HOST = process.env.RAPIDAPI_HOST!;
-const KEY  = process.env.RAPIDAPI_KEY!;
+const KEY = process.env.RAPIDAPI_KEY!;
 
 /** Allowed GET endpoints */
 const ALLOWGET = new Set<string>(["apolloaccounts", "industries", "page"]);
 
 /** Helpers */
-function extractList(x: any): any[] {
+function extractList(x: unknown): unknown[] {
   if (!x) return [];
   if (Array.isArray(x)) return x;
-  if (Array.isArray(x?.results)) return x.results;
-  if (Array.isArray(x?.data)) return x.data;
+  if (typeof x === "object" && x !== null) {
+    const obj = x as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return obj.results;
+    if (Array.isArray(obj.data)) return obj.data;
+  }
   return [x]; // single object → wrap
 }
+
 function takeFirst<T>(arr: unknown, n = 5): T[] {
   return Array.isArray(arr) ? (arr as T[]).slice(0, n) : [];
 }
@@ -36,10 +40,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { endpoint, params } = (await req.json()) as {
+    const body = (await req.json()) as {
       endpoint?: string;
-      params?: Record<string, any>;
+      params?: Record<string, string | number | undefined>;
     };
+    const { endpoint, params } = body;
 
     if (!endpoint || !ALLOWGET.has(endpoint)) {
       return NextResponse.json({ error: "Unsupported or missing endpoint" }, { status: 400 });
@@ -49,16 +54,12 @@ export async function POST(req: NextRequest) {
     const url = new URL(`${BASE}/${endpoint}`);
 
     if (endpoint === "apolloaccounts") {
-      // ONLY name is supported here (per working snippet)
       const name = String(params?.name ?? "").trim();
       if (!name) {
         return NextResponse.json({ error: "Missing required param: name" }, { status: 400 });
       }
       url.searchParams.set("name", name);
-    } else if (endpoint === "industries") {
-      // no required params
     } else if (endpoint === "page") {
-      // Allow only documented keys
       const allowed = [
         "qKeywords",
         "locations",
@@ -68,7 +69,7 @@ export async function POST(req: NextRequest) {
         "revenueRangeMin",
         "revenueRangeMax",
         "next", // pagination token
-      ];
+      ] as const;
       for (const k of allowed) {
         const v = params?.[k];
         if (v !== undefined && v !== null && String(v).trim() !== "") {
@@ -91,10 +92,13 @@ export async function POST(req: NextRequest) {
     const upstreamText = await upstream.text();
 
     if (!upstream.ok) {
-      // Surface provider error clearly during dev
       console.error("UPSTREAM ERROR", upstream.status, upstreamText);
-      let payload: any;
-      try { payload = JSON.parse(upstreamText); } catch { payload = { rawText: upstreamText }; }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(upstreamText);
+      } catch {
+        payload = { rawText: upstreamText };
+      }
       return NextResponse.json(
         { error: "Upstream error", status: upstream.status, data: payload },
         { status: 502 }
@@ -102,59 +106,84 @@ export async function POST(req: NextRequest) {
     }
 
     // Parse JSON (fallback to text if necessary)
-    let parsed: any;
-    try { parsed = JSON.parse(upstreamText); } catch { parsed = upstreamText; }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(upstreamText);
+    } catch {
+      parsed = upstreamText;
+    }
 
     // ---- Normalization ----
     if (endpoint === "apolloaccounts") {
       const list = extractList(parsed);
-      const items = takeFirst(list, 5).map((r: any) => ({
-        name: r?.name ?? r?.company ?? null,
-        domain: r?.domain ?? r?.websiteUrl ?? r?.website ?? null,
-        websiteUrl: r?.websiteUrl ?? r?.website ?? null,
-        logoUrl: r?.logoUrl ?? null,
-        size: r?.size ?? r?.employee_count ?? null,
-        industry: r?.industry ?? null,
-        linkedin: r?.linkedin_url ?? r?.linkedin ?? null,
-        id: r?.id ?? null,
+      const items = takeFirst<Record<string, unknown>>(list, 5).map((r) => ({
+        name: (r as any)?.name ?? (r as any)?.company ?? null,
+        domain:
+          (r as any)?.domain ??
+          (r as any)?.websiteUrl ??
+          (r as any)?.website ??
+          null,
+        websiteUrl: (r as any)?.websiteUrl ?? (r as any)?.website ?? null,
+        logoUrl: (r as any)?.logoUrl ?? null,
+        size: (r as any)?.size ?? (r as any)?.employee_count ?? null,
+        industry: (r as any)?.industry ?? null,
+        linkedin: (r as any)?.linkedin_url ?? (r as any)?.linkedin ?? null,
+        id: (r as any)?.id ?? null,
       }));
       return NextResponse.json({ ok: true, count: items.length, items });
     }
 
     if (endpoint === "industries") {
       const list = extractList(parsed);
-      const items = takeFirst(list, 50).map((r: any) => ({
-        id: r?.id ?? r,
-        name: r?.name ?? r,
+      const items = takeFirst<Record<string, unknown>>(list, 50).map((r) => ({
+        id: (r as any)?.id ?? r,
+        name: (r as any)?.name ?? r,
       }));
       return NextResponse.json({ ok: true, count: items.length, items });
     }
 
     // endpoint === "page"
     {
-      // Prefer documented container: people[]
-      const rawPeople = Array.isArray((parsed as any)?.people)
-        ? (parsed as any).people
+      const parsedObj = parsed as Record<string, unknown>;
+      const rawPeople = Array.isArray(parsedObj?.people)
+        ? (parsedObj.people as unknown[])
         : extractList(parsed);
 
-      const items = takeFirst(rawPeople, 5).map((r: any) => ({
-        // Name: name OR first+last OR first
-        name: r?.name ?? ((r?.firstName && r?.lastName) ? `${r.firstName} ${r.lastName}` : (r?.firstName ?? null)),
-        title: r?.title ?? r?.personTitle ?? null,
-        company: r?.organizationName ?? r?.company ?? r?.companyName ?? null,
-        domain: r?.organizationWebsiteUrl ?? r?.domain ?? r?.websiteUrl ?? null,
-        linkedin: r?.linkedinUrl ?? r?.organizationLinkedinUrl ?? r?.linkedin ?? null,
-        phone: r?.organizationPhone ?? r?.phone ?? null,
+      const items = takeFirst<Record<string, unknown>>(rawPeople, 5).map((r) => ({
+        name:
+          (r as any)?.name ??
+          ((r as any)?.firstName && (r as any)?.lastName
+            ? `${(r as any).firstName} ${(r as any).lastName}`
+            : (r as any)?.firstName ?? null),
+        title: (r as any)?.title ?? (r as any)?.personTitle ?? null,
+        company:
+          (r as any)?.organizationName ??
+          (r as any)?.company ??
+          (r as any)?.companyName ??
+          null,
+        domain:
+          (r as any)?.organizationWebsiteUrl ??
+          (r as any)?.domain ??
+          (r as any)?.websiteUrl ??
+          null,
+        linkedin:
+          (r as any)?.linkedinUrl ??
+          (r as any)?.organizationLinkedinUrl ??
+          (r as any)?.linkedin ??
+          null,
+        phone: (r as any)?.organizationPhone ?? (r as any)?.phone ?? null,
         location:
-          (r?.city && r?.country) ? `${r.city}, ${r.country}`
-          : (r?.city ?? r?.country ?? r?.state ?? null),
-        email: r?.email ?? null,             // likely empty on RapidAPI plan
-        about: r?.organizationAbout ?? null, // org description if present
+          (r as any)?.city && (r as any)?.country
+            ? `${(r as any).city}, ${(r as any).country}`
+            : (r as any)?.city ?? (r as any)?.country ?? (r as any)?.state ?? null,
+        email: (r as any)?.email ?? null,
+        about: (r as any)?.organizationAbout ?? null,
       }));
 
       return NextResponse.json({ ok: true, count: items.length, items });
     }
-  } catch (err: any) {
-    return NextResponse.json({ error: err?.message ?? "Unknown server error" }, { status: 500 });
+  } catch (err) {
+    const e = err as Error;
+    return NextResponse.json({ error: e.message ?? "Unknown server error" }, { status: 500 });
   }
 }
