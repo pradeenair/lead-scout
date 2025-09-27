@@ -1,5 +1,8 @@
 // src/app/layout.tsx
-export const metadata = {
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
   title: "Lead Scout",
   description: "Prospect finder tool",
 };
